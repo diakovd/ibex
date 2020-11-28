@@ -10,14 +10,13 @@
  * Specification, draft version 1.11
  */
 module ibex_cs_registers #(
-    parameter bit          DbgTriggerEn     = 0,
     parameter int unsigned MHPMCounterNum   = 8,
     parameter int unsigned MHPMCounterWidth = 40,
     parameter bit          PMPEnable        = 0,
     parameter int unsigned PMPGranularity   = 0,
     parameter int unsigned PMPNumRegions    = 4,
-    parameter bit          RV32E            = 0,
-    parameter bit          RV32M            = 0
+    parameter bit RV32E                     = 0,
+    parameter bit RV32M                     = 0
 ) (
     // Clock and Reset
     input  logic                 clk_i,
@@ -50,7 +49,6 @@ module ibex_cs_registers #(
     input  logic                 irq_external_i,
     input  logic [14:0]          irq_fast_i,
     output logic                 irq_pending_o,          // interupt request pending
-    input  logic                 nmi_mode_i,
     output logic                 csr_msip_o,             // software interrupt pending
     output logic                 csr_mtip_o,             // timer interrupt pending
     output logic                 csr_meip_o,             // external interrupt pending
@@ -70,7 +68,6 @@ module ibex_cs_registers #(
     output logic                 debug_single_step_o,
     output logic                 debug_ebreakm_o,
     output logic                 debug_ebreaku_o,
-    output logic                 trigger_match_o,
 
     input  logic [31:0]          pc_if_i,
     input  logic [31:0]          pc_id_i,
@@ -114,7 +111,7 @@ module ibex_cs_registers #(
     | (32'(RV32M) << 12)  // M - Integer Multiply/Divide extension
     | (0          << 13)  // N - User level interrupts supported
     | (0          << 18)  // S - Supervisor mode implemented
-    | (1          << 20)  // U - User mode implemented
+    | (0          << 20)  // U - User mode implemented
     | (0          << 23)  // X - Non-standard extensions present
     | (32'(MXL)   << 30); // M-XLEN
 
@@ -187,26 +184,17 @@ module ibex_cs_registers #(
   logic [PMP_CFG_W-1:0]        pmp_cfg_rdata   [PMP_MAX_REGIONS];
 
   // Hardware performance monitor signals
-  logic [31:0]                 mcountinhibit;
-  // Only have mcountinhibit flops for counters that actually exist
-  logic [MHPMCounterNum+3-1:0] mcountinhibit_d, mcountinhibit_q;
-  logic                        mcountinhibit_we;
-
+  logic [31:0] mcountinhibit_d, mcountinhibit_q, mcountinhibit;
+  logic [31:0] mcountinhibit_force;
+  logic        mcountinhibit_we;
+  logic [63:0] mhpmcounter_mask [32];
   logic [63:0] mhpmcounter_d [32];
-  // mhpmcounter flops are elaborated below providing only the precise number that is required based
-  // on MHPMCounterNum/MHPMCounterWidth. This signal connects to the Q output of these flops
-  // where they exist and is otherwise 0.
-  logic [63:0] mhpmcounter [32];
+  logic [63:0] mhpmcounter_q [32];
   logic [31:0] mhpmcounter_we;
   logic [31:0] mhpmcounterh_we;
   logic [31:0] mhpmcounter_incr;
   logic [31:0] mhpmevent [32];
   logic  [4:0] mhpmcounter_idx;
-
-  // Debug / trigger registers
-  logic [31:0] tselect_rdata;
-  logic [31:0] tmatch_control_rdata;
-  logic [31:0] tmatch_value_rdata;
 
   // CSR update logic
   logic [31:0] csr_wdata_int;
@@ -364,7 +352,7 @@ module ibex_cs_registers #(
       CSR_MHPMCOUNTER20, CSR_MHPMCOUNTER21, CSR_MHPMCOUNTER22, CSR_MHPMCOUNTER23,
       CSR_MHPMCOUNTER24, CSR_MHPMCOUNTER25, CSR_MHPMCOUNTER26, CSR_MHPMCOUNTER27,
       CSR_MHPMCOUNTER28, CSR_MHPMCOUNTER29, CSR_MHPMCOUNTER30, CSR_MHPMCOUNTER31: begin
-        csr_rdata_int = mhpmcounter[mhpmcounter_idx][31:0];
+        csr_rdata_int = mhpmcounter_q[mhpmcounter_idx][31:0];
       end
 
       CSR_MCYCLEH,
@@ -377,33 +365,7 @@ module ibex_cs_registers #(
       CSR_MHPMCOUNTER20H, CSR_MHPMCOUNTER21H, CSR_MHPMCOUNTER22H, CSR_MHPMCOUNTER23H,
       CSR_MHPMCOUNTER24H, CSR_MHPMCOUNTER25H, CSR_MHPMCOUNTER26H, CSR_MHPMCOUNTER27H,
       CSR_MHPMCOUNTER28H, CSR_MHPMCOUNTER29H, CSR_MHPMCOUNTER30H, CSR_MHPMCOUNTER31H: begin
-        csr_rdata_int = mhpmcounter[mhpmcounter_idx][63:32];
-      end
-
-      // Debug triggers
-      CSR_TSELECT: begin
-        csr_rdata_int = tselect_rdata;
-        illegal_csr   = ~DbgTriggerEn;
-      end
-      CSR_TDATA1: begin
-        csr_rdata_int = tmatch_control_rdata;
-        illegal_csr   = ~DbgTriggerEn;
-      end
-      CSR_TDATA2: begin
-        csr_rdata_int = tmatch_value_rdata;
-        illegal_csr   = ~DbgTriggerEn;
-      end
-      CSR_TDATA3: begin
-        csr_rdata_int = '0;
-        illegal_csr   = ~DbgTriggerEn;
-      end
-      CSR_MCONTEXT: begin
-        csr_rdata_int = '0;
-        illegal_csr   = ~DbgTriggerEn;
-      end
-      CSR_SCONTEXT: begin
-        csr_rdata_int = '0;
-        illegal_csr   = ~DbgTriggerEn;
+        csr_rdata_int = mhpmcounter_q[mhpmcounter_idx][63:32];
       end
 
       default: begin
@@ -476,7 +438,8 @@ module ibex_cs_registers #(
         // mtvec
         // mtvec.MODE set to vectored
         // mtvec.BASE must be 256-byte aligned
-        CSR_MTVEC: mtvec_d = {csr_wdata_int[31:8], 6'b0, 2'b01};
+//        CSR_MTVEC: mtvec_d =  {csr_wdata_int[31:8], 6'b0, 2'b01};
+        CSR_MTVEC: mtvec_d =  csr_wdata_int;////correction for SEGGER EMBEDdED STUDIO
 
         CSR_DCSR: begin
           dcsr_d = csr_wdata_int;
@@ -585,19 +548,13 @@ module ibex_cs_registers #(
       csr_restore_mret_i: begin // MRET
         priv_lvl_d     = mstatus_q.mpp;
         mstatus_d.mie  = mstatus_q.mpie; // re-enable interrupts
-
-        if (nmi_mode_i) begin
-          // when returning from an NMI restore state from mstack CSR
-          mstatus_d.mpie = mstack_q.mpie;
-          mstatus_d.mpp  = mstack_q.mpp;
-          mepc_d         = mstack_epc_q;
-          mcause_d       = mstack_cause_q;
-        end else begin
-          // otherwise just set mstatus.MPIE/MPP
-          // See RISC-V Privileged Specification, version 1.11, Section 3.1.6.1
-          mstatus_d.mpie = 1'b1;
-          mstatus_d.mpp  = PRIV_LVL_U;
-        end
+        // restore previous status for recoverable NMI
+        mstatus_d.mpie = mstack_q.mpie;
+        mstatus_d.mpp  = mstack_q.mpp;
+        mepc_d         = mstack_epc_q;
+        mcause_d       = mstack_cause_q;
+        mstack_d.mpie  = 1'b1;
+        mstack_d.mpp   = PRIV_LVL_U;
       end // csr_restore_mret_i
 
       default:;
@@ -617,8 +574,8 @@ module ibex_cs_registers #(
         csr_wreq      = 1'b0;
       end
       default: begin
-        csr_wdata_int = csr_wdata_i;
-        csr_wreq      = 1'b0;
+        csr_wdata_int = 'X;
+        csr_wreq      = 1'bX;
       end
     endcase
   end
@@ -712,7 +669,12 @@ module ibex_cs_registers #(
   // -----------------
   // PMP registers
   // -----------------
-
+  generate 	
+  genvar y;	
+  genvar u;
+  genvar p;
+  genvar t;
+  
   if (PMPEnable) begin : g_pmp_registers
     pmp_cfg_t                    pmp_cfg         [PMPNumRegions];
     pmp_cfg_t                    pmp_cfg_wdata   [PMPNumRegions];
@@ -721,116 +683,118 @@ module ibex_cs_registers #(
     logic [PMPNumRegions-1:0]    pmp_addr_we;
 
     // Expanded / qualified register read data
-    for (genvar i = 0; i < PMP_MAX_REGIONS; i++) begin : g_exp_rd_data
-      if (i < PMPNumRegions) begin : g_implemented_regions
+    for (t = 0; t < PMP_MAX_REGIONS; t++) begin : g_exp_rd_data
+      if (t < PMPNumRegions) begin : g_implemented_regions
         // Add in zero padding for reserved fields
-        assign pmp_cfg_rdata[i] = {pmp_cfg[i].lock, 2'b00, pmp_cfg[i].mode,
-                                   pmp_cfg[i].exec, pmp_cfg[i].write, pmp_cfg[i].read};
+        assign pmp_cfg_rdata[t] = {pmp_cfg[t].lock, 2'b00, pmp_cfg[t].mode,
+                                   pmp_cfg[t].exec, pmp_cfg[t].write, pmp_cfg[t].read};
 
         // Address field read data depends on the current programmed mode and the granularity
         // See RISC-V Privileged Specification, version 1.11, Section 3.6.1
         if (PMPGranularity == 0) begin : g_pmp_g0
           // If G == 0, read data is unmodified
-          assign pmp_addr_rdata[i] = pmp_addr[i];
+          assign pmp_addr_rdata[t] = pmp_addr[t];
 
         end else if (PMPGranularity == 1) begin : g_pmp_g1
           // If G == 1, bit [G-1] reads as zero in TOR or OFF mode
           always_comb begin
-            pmp_addr_rdata[i] = pmp_addr[i];
-            if ((pmp_cfg[i].mode == PMP_MODE_OFF) || (pmp_cfg[i].mode == PMP_MODE_TOR)) begin
-              pmp_addr_rdata[i][PMPGranularity-1:0] = '0;
+            pmp_addr_rdata[t] = pmp_addr[t];
+            if ((pmp_cfg[t].mode == PMP_MODE_OFF) || (pmp_cfg[t].mode == PMP_MODE_TOR)) begin
+              pmp_addr_rdata[t][PMPGranularity-1:0] = '0;
             end
           end
 
         end else begin : g_pmp_g2
           // For G >= 2, bits are masked to one or zero depending on the mode
           always_comb begin
-            pmp_addr_rdata[i] = pmp_addr[i];
-            if ((pmp_cfg[i].mode == PMP_MODE_OFF) || (pmp_cfg[i].mode == PMP_MODE_TOR)) begin
+            pmp_addr_rdata[t] = pmp_addr[t];
+            if ((pmp_cfg[t].mode == PMP_MODE_OFF) || (pmp_cfg[t].mode == PMP_MODE_TOR)) begin
               // In TOR or OFF mode, bits [G-1:0] must read as zero
-              pmp_addr_rdata[i][PMPGranularity-1:0] = '0;
-            end else if (pmp_cfg[i].mode == PMP_MODE_NAPOT) begin
+              pmp_addr_rdata[t][PMPGranularity-1:0] = '0;
+            end else if (pmp_cfg[t].mode == PMP_MODE_NAPOT) begin
               // In NAPOT mode, bits [G-2:0] must read as one
-              pmp_addr_rdata[i][PMPGranularity-2:0] = '1;
+              pmp_addr_rdata[t][PMPGranularity-2:0] = '1;
             end
           end
         end
 
       end else begin : g_other_regions
         // Non-implemented regions read as zero
-        assign pmp_cfg_rdata[i]  = '0;
-        assign pmp_addr_rdata[i] = '0;
+        assign pmp_cfg_rdata[t]  = '0;
+        assign pmp_addr_rdata[t] = '0;
       end
     end
-
+	
     // Write data calculation
-    for (genvar i = 0; i < PMPNumRegions; i++) begin : g_pmp_csrs
+    for (p = 0; p < PMPNumRegions; p++) begin : g_pmp_csrs
       // -------------------------
       // Instantiate cfg registers
       // -------------------------
-      assign pmp_cfg_we[i] = csr_we_int & ~pmp_cfg[i].lock &
-                             (csr_addr == (CSR_OFF_PMP_CFG + (i[11:0] >> 2)));
+      assign pmp_cfg_we[p] = csr_we_int & ~pmp_cfg[p].lock &
+                             (csr_addr == (CSR_OFF_PMP_CFG + (p[11:0] >> 2)));
 
       // Select the correct WDATA (each CSR contains 4 CFG fields, each with 2 RES bits)
-      assign pmp_cfg_wdata[i].lock  = csr_wdata_int[(i%4)*PMP_CFG_W+7];
+      assign pmp_cfg_wdata[p].lock  = csr_wdata_int[(p%4)*PMP_CFG_W+7];
       // NA4 mode is not selectable when G > 0, mode is treated as OFF
       always_comb begin
-        unique case (csr_wdata_int[(i%4)*PMP_CFG_W+3+:2])
-          2'b00   : pmp_cfg_wdata[i].mode = PMP_MODE_OFF;
-          2'b01   : pmp_cfg_wdata[i].mode = PMP_MODE_TOR;
-          2'b10   : pmp_cfg_wdata[i].mode = (PMPGranularity == 0) ? PMP_MODE_NA4:
+        unique case (csr_wdata_int[(p%4)*PMP_CFG_W+3+:2])
+          2'b00   : pmp_cfg_wdata[p].mode = PMP_MODE_OFF;
+          2'b01   : pmp_cfg_wdata[p].mode = PMP_MODE_TOR;
+          2'b10   : pmp_cfg_wdata[p].mode = (PMPGranularity == 0) ? PMP_MODE_NA4:
                                                                     PMP_MODE_OFF;
-          2'b11   : pmp_cfg_wdata[i].mode = PMP_MODE_NAPOT;
-          default : pmp_cfg_wdata[i].mode = PMP_MODE_OFF;
+          2'b11   : pmp_cfg_wdata[p].mode = PMP_MODE_NAPOT;
+          default : pmp_cfg_wdata[p].mode = pmp_cfg_mode_e'('X);
         endcase
       end
-      assign pmp_cfg_wdata[i].exec  = csr_wdata_int[(i%4)*PMP_CFG_W+2];
+      assign pmp_cfg_wdata[p].exec  = csr_wdata_int[(p%4)*PMP_CFG_W+2];
       // W = 1, R = 0 is a reserved combination. For now, we force W to 0 if R == 0
-      assign pmp_cfg_wdata[i].write = &csr_wdata_int[(i%4)*PMP_CFG_W+:2];
-      assign pmp_cfg_wdata[i].read  = csr_wdata_int[(i%4)*PMP_CFG_W];
+      assign pmp_cfg_wdata[p].write = &csr_wdata_int[(p%4)*PMP_CFG_W+:2];
+      assign pmp_cfg_wdata[p].read  = csr_wdata_int[(p%4)*PMP_CFG_W];
 
       always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
-          pmp_cfg[i] <= pmp_cfg_t'('b0);
-        end else if (pmp_cfg_we[i]) begin
-          pmp_cfg[i] <= pmp_cfg_wdata[i];
+          pmp_cfg[p] <= pmp_cfg_t'('b0);
+        end else if (pmp_cfg_we[p]) begin
+          pmp_cfg[p] <= pmp_cfg_wdata[p];
         end
       end
 
       // --------------------------
       // Instantiate addr registers
       // --------------------------
-      if (i < PMPNumRegions - 1) begin : g_lower
-        assign pmp_addr_we[i] = csr_we_int & ~pmp_cfg[i].lock &
-                                (pmp_cfg[i+1].mode != PMP_MODE_TOR) &
-                                (csr_addr == (CSR_OFF_PMP_ADDR + i[11:0]));
+      if (p < PMPNumRegions - 1) begin : g_lower
+        assign pmp_addr_we[p] = csr_we_int & ~pmp_cfg[p].lock &
+                                (pmp_cfg[p+1].mode != PMP_MODE_TOR) &
+                                (csr_addr == (CSR_OFF_PMP_ADDR + p[11:0]));
       end else begin : g_upper
-        assign pmp_addr_we[i] = csr_we_int & ~pmp_cfg[i].lock &
-                                (csr_addr == (CSR_OFF_PMP_ADDR + i[11:0]));
+        assign pmp_addr_we[p] = csr_we_int & ~pmp_cfg[p].lock &
+                                (csr_addr == (CSR_OFF_PMP_ADDR + p[11:0]));
       end
 
       always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
-          pmp_addr[i] <= 'b0;
-        end else if (pmp_addr_we[i]) begin
-          pmp_addr[i] <= csr_wdata_int;
+          pmp_addr[p] <= 'b0;
+        end else if (pmp_addr_we[p]) begin
+          pmp_addr[p] <= csr_wdata_int;
         end
       end
-      assign csr_pmp_cfg_o[i]  = pmp_cfg[i];
-      assign csr_pmp_addr_o[i] = {pmp_addr[i],2'b00};
+      assign csr_pmp_cfg_o[p]  = pmp_cfg[p];
+      assign csr_pmp_addr_o[p] = {pmp_addr[p],2'b00};
     end
 
   end else begin : g_no_pmp_tieoffs
     // Generate tieoffs when PMP is not configured
-    for (genvar i = 0; i < PMP_MAX_REGIONS; i++) begin : g_rdata
-      assign pmp_addr_rdata[i] = '0;
-      assign pmp_cfg_rdata[i]  = '0;
+    for (u = 0; u < PMP_MAX_REGIONS; u++) begin : g_rdata
+      assign pmp_addr_rdata[u] = '0;
+      assign pmp_cfg_rdata[u]  = '0;
     end
-    for (genvar i = 0; i < PMPNumRegions; i++) begin : g_outputs
-      assign csr_pmp_cfg_o[i]  = pmp_cfg_t'(1'b0);
-      assign csr_pmp_addr_o[i] = '0;
+
+    for (y = 0; y < PMPNumRegions; y++) begin : g_outputs
+      assign csr_pmp_cfg_o[y]  = pmp_cfg_t'(1'b0);
+      assign csr_pmp_addr_o[y] = '0;
     end
   end
+  endgenerate 	
 
   //////////////////////////
   //  Performance monitor //
@@ -839,11 +803,14 @@ module ibex_cs_registers #(
   // update enable signals
   always_comb begin : mcountinhibit_update
     if (mcountinhibit_we == 1'b1) begin
-      mcountinhibit_d = {csr_wdata_int[MHPMCounterNum+2:2], 1'b0, csr_wdata_int[0]}; // bit 1 must always be 0
+      mcountinhibit_d = {csr_wdata_int[31:2], 1'b0, csr_wdata_int[0]}; // bit 1 must always be 0
     end else begin
       mcountinhibit_d = mcountinhibit_q;
     end
   end
+
+  assign mcountinhibit_force = {{29-MHPMCounterNum{1'b1}}, {MHPMCounterNum{1'b0}}, 3'b000};
+  assign mcountinhibit       = mcountinhibit_q | mcountinhibit_force;
 
   // event selection (hardwired) & control
   always_comb begin : gen_mhpmcounter_incr
@@ -888,155 +855,56 @@ module ibex_cs_registers #(
     end
   end
 
+  // mask, controls effective counter width
+  always_comb begin : gen_mask
+
+    for (int i=0; i<3; i++) begin : gen_mask_fixed
+      // mcycle, mtime, minstret are always 64 bit wide
+      mhpmcounter_mask[i] = {64{1'b1}};
+    end
+
+    for (int unsigned i=3; i<3+MHPMCounterNum; i++) begin : gen_mask_configurable
+      // mhpmcounters have a configurable width
+      mhpmcounter_mask[i] = {{64-MHPMCounterWidth{1'b0}}, {MHPMCounterWidth{1'b1}}};
+    end
+
+    for (int unsigned i=3+MHPMCounterNum; i<32; i++) begin : gen_mask_inactive
+      // mask inactive mhpmcounters
+      mhpmcounter_mask[i] = '0;
+    end
+  end
+
   // update
   always_comb begin : mhpmcounter_update
-    mhpmcounter_d = mhpmcounter;
+    mhpmcounter_d = mhpmcounter_q;
 
     for (int i=0; i<32; i++) begin : gen_mhpmcounter_update
 
       // increment
       if (mhpmcounter_incr[i] & ~mcountinhibit[i]) begin
-        mhpmcounter_d[i] = mhpmcounter[i] + 64'h1;
+        mhpmcounter_d[i] = mhpmcounter_mask[i] & (mhpmcounter_q[i] + 64'h1);
       end
 
       // write
       if (mhpmcounter_we[i]) begin
-        mhpmcounter_d[i][31: 0] = csr_wdata_int;
+        mhpmcounter_d[i][31: 0] = mhpmcounter_mask[i][31: 0] & csr_wdata_int;
       end else if (mhpmcounterh_we[i]) begin
-        mhpmcounter_d[i][63:32] = csr_wdata_int;
+        mhpmcounter_d[i][63:32] = mhpmcounter_mask[i][63:32] & csr_wdata_int;
       end
     end
   end
 
-  // Performance monitor registers
-  // Only elaborate flops that are needed from the given MHPMCounterWidth and MHPMCounterNum
-  // parameters
-  for (genvar i = 0; i < 32; i++) begin : g_mhpmcounter
-    // First 3 counters (cycle, time, instret) must always be elaborated
-    if (i < 3 + MHPMCounterNum) begin : g_mhpmcounter_exists
-      // First 3 counters must be 64-bit the rest have parameterisable width
-      localparam int unsigned IMHPMCounterWidth = i < 3 ? 64 : MHPMCounterWidth;
-
-      logic [IMHPMCounterWidth-1:0] mhpmcounter_q;
-
-      always @(posedge clk_i or negedge rst_ni) begin
-        if(~rst_ni) begin
-          mhpmcounter_q <= '0;
-        end else begin
-          mhpmcounter_q <= mhpmcounter_d[i][IMHPMCounterWidth-1:0];
-        end
-      end
-
-      if (IMHPMCounterWidth < 64) begin : g_mhpmcounter_narrow
-        assign mhpmcounter[i][IMHPMCounterWidth-1:0] = mhpmcounter_q;
-        assign mhpmcounter[i][63:IMHPMCounterWidth]  = '0;
-      end else begin : g_mhpmcounter_full
-        assign mhpmcounter[i] = mhpmcounter_q;
-      end
-    end else begin : g_no_mhpmcounter
-      assign mhpmcounter[i] = '0;
-    end
-  end
-
-  if(MHPMCounterNum < 29) begin : g_mcountinhibit_reduced
-    assign mcountinhibit = {{29-MHPMCounterNum{1'b1}}, mcountinhibit_q};
-  end else begin : g_mcountinhibit_full
-    assign mcountinhibit = mcountinhibit_q;
-  end
-
-  always_ff @(posedge clk_i or negedge rst_ni) begin
+  // performance monitor registers
+  always_ff @(posedge clk_i or negedge rst_ni) begin : perf_counter_registers
     if (!rst_ni) begin
-      mcountinhibit_q <= '0;
+      mcountinhibit_q    <= '0;
+      for (int i=0; i<32; i++) begin
+        mhpmcounter_q[i] <= '0;
+      end
     end else begin
-      mcountinhibit_q <= mcountinhibit_d;
+      mhpmcounter_q      <= mhpmcounter_d;
+      mcountinhibit_q    <= mcountinhibit_d;
     end
   end
-
-  /////////////////////////////
-  // Debug trigger registers //
-  /////////////////////////////
-
-  if (DbgTriggerEn) begin : gen_trigger_regs
-    // Register values
-    logic        tmatch_control_d, tmatch_control_q;
-    logic [31:0] tmatch_value_d, tmatch_value_q;
-    // Write enables
-    logic tmatch_control_we;
-    logic tmatch_value_we;
-
-    // Write select
-    assign tmatch_control_we = csr_we_int & debug_mode_i & (csr_addr_i == CSR_TDATA1);
-    assign tmatch_value_we   = csr_we_int & debug_mode_i & (csr_addr_i == CSR_TDATA2);
-
-    // tmatch_control is enabled when the execute bit is set
-    assign tmatch_control_d = tmatch_control_we ? csr_wdata_int[2] :
-                                                  tmatch_control_q;
-    // tmatch_value has its own clock gate
-    assign tmatch_value_d   = csr_wdata_int[31:0];
-
-    // Registers
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) begin
-        tmatch_control_q <= 'b0;
-      end else begin
-        tmatch_control_q <= tmatch_control_d;
-      end
-    end
-
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) begin
-        tmatch_value_q <= 'b0;
-      end else if (tmatch_value_we) begin
-        tmatch_value_q <= tmatch_value_d;
-      end
-    end
-
-    // Assign read data
-    // TSELECT - only one supported
-    assign tselect_rdata = 'b0;
-    // TDATA0 - only support simple address matching
-    assign tmatch_control_rdata = {4'h2,              // type    : address/data match
-                                   1'b1,              // dmode   : access from D mode only
-                                   6'h00,             // maskmax : exact match only
-                                   1'b0,              // hit     : not supported
-                                   1'b0,              // select  : address match only
-                                   1'b0,              // timing  : match before execution
-                                   2'b00,             // sizelo  : match any access
-                                   4'h1,              // action  : enter debug mode
-                                   1'b0,              // chain   : not supported
-                                   4'h0,              // match   : simple match
-                                   1'b1,              // m       : match in m-mode
-                                   1'b0,              // 0       : zero
-                                   1'b0,              // s       : not supported
-                                   1'b1,              // u       : match in u-mode
-                                   tmatch_control_q,  // execute : match instruction address
-                                   1'b0,              // store   : not supported
-                                   1'b0};             // load    : not supported
-    // TDATA1 - address match value only
-    assign tmatch_value_rdata = tmatch_value_q;
-
-    // Breakpoint matching
-    // We match against the next address, as the breakpoint must be taken before execution
-    assign trigger_match_o = tmatch_control_q & (pc_if_i[31:0] == tmatch_value_q[31:0]);
-
-  end else begin : gen_no_trigger_regs
-    assign tselect_rdata        = 'b0;
-    assign tmatch_control_rdata = 'b0;
-    assign tmatch_value_rdata   = 'b0;
-    assign trigger_match_o      = 'b0;
-  end
-
-  ////////////////
-  // Assertions //
-  ////////////////
-
-  // Selectors must be known/valid.
-  `ASSERT(IbexCsrOpValid, csr_op_i inside {
-      CSR_OP_READ,
-      CSR_OP_WRITE,
-      CSR_OP_SET,
-      CSR_OP_CLEAR
-      }, clk_i, !rst_ni)
-  `ASSERT_KNOWN(IbexCsrWdataIntKnown, csr_wdata_int, clk_i, !rst_ni)
 
 endmodule

@@ -74,9 +74,7 @@ module ibex_prefetch_buffer (
   // PMP errors are generated in the address phase, and registered into a fake data phase
   assign instr_or_pmp_err = instr_err_i | rdata_pmp_err_q[0];
 
-  // A branch will invalidate any previously fetched instructions.
-  // Note that the FENCE.I instruction relies on this flushing behaviour on branch. If it is
-  // altered the FENCE.I implementation may require changes.
+  // A branch will invalidate any previously fetched instructions
   assign fifo_clear = branch_i;
 
   ibex_fetch_fifo #(
@@ -179,7 +177,9 @@ module ibex_prefetch_buffer (
   // Request outstanding queue //
   ///////////////////////////////
 
-  for (genvar i = 0; i < NUM_REQS; i++) begin : g_outstanding_reqs
+  generate
+  genvar i;
+  for (i = 0; i < NUM_REQS; i++) begin : g_outstanding_reqs
     // Request 0 (always the oldest outstanding request)
     if (i == 0) begin : g_req0
       // A request becomes outstanding once granted, and is cleared once the rvalid is received.
@@ -209,7 +209,8 @@ module ibex_prefetch_buffer (
                                       rdata_pmp_err_q[i];
     end
   end
-
+  endgenerate
+  
   // Shift the entries down on each instr_rvalid_i
   assign rdata_outstanding_s = rvalid_or_pmp_err ? {1'b0,rdata_outstanding_n[NUM_REQS-1:1]} :
                                                    rdata_outstanding_n;

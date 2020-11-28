@@ -44,8 +44,10 @@ module ibex_pmp #(
   // ---------------
   // Access checking
   // ---------------
-
-  for (genvar r = 0; r < PMPNumRegions; r++) begin : g_addr_exp
+  generate
+  genvar r;
+  genvar b;	
+  for (r = 0; r < PMPNumRegions; r++) begin : g_addr_exp
     // Start address for TOR matching
     if (r == 0) begin : g_entry0
       assign region_start_addr[r] = (csr_pmp_cfg_i[r].mode == PMP_MODE_TOR) ? 34'h000000000 :
@@ -55,7 +57,7 @@ module ibex_pmp #(
                                                                               csr_pmp_addr_i[r];
     end
     // Address mask for NA matching
-    for (genvar b = PMPGranularity+2; b < 34; b++) begin : g_bitmask
+    for (b = PMPGranularity+2; b < 34; b++) begin : g_bitmask
       if (b == PMPGranularity+2) begin : g_bit0
         // Always mask bit (G+2) for NAPOT
         assign region_addr_mask[r][b] = (csr_pmp_cfg_i[r].mode != PMP_MODE_NAPOT);
@@ -70,33 +72,38 @@ module ibex_pmp #(
       end
     end
   end
+  endgenerate	
 
-  for (genvar c = 0; c < PMPNumChan; c++) begin : g_access_check
-    for (genvar r = 0; r < PMPNumRegions; r++) begin : g_regions
+  generate
+  genvar d;
+  genvar h;
+  for (d = 0; d < PMPNumChan; d++) begin : g_access_check
+    for (h = 0; h < PMPNumRegions; h++) begin : g_regions
       // TOR Region high/low matching is reused for all match types
-      assign region_match_low[c][r]     = (pmp_req_addr_i[c][33:PMPGranularity+2] >=
+      assign region_match_low[d][h]     = (pmp_req_addr_i[d][33:PMPGranularity+2] >=
                                            // Comparators are sized according to granularity
-                                           (region_start_addr[r][33:PMPGranularity+2] &
-                                            region_addr_mask[r]));
-      assign region_match_high[c][r]    = (pmp_req_addr_i[c][33:PMPGranularity+2] <=
-                                           csr_pmp_addr_i[r][33:PMPGranularity+2]);
-      assign region_match_both[c][r]    = region_match_low[c][r] & region_match_high[c][r] &
-                                          (csr_pmp_cfg_i[r].mode != PMP_MODE_OFF);
+                                           (region_start_addr[h][33:PMPGranularity+2] &
+                                            region_addr_mask[h]));
+      assign region_match_high[d][h]    = (pmp_req_addr_i[d][33:PMPGranularity+2] <=
+                                           csr_pmp_addr_i[h][33:PMPGranularity+2]);
+      assign region_match_both[d][h]    = region_match_low[d][h] & region_match_high[d][h] &
+                                          (csr_pmp_cfg_i[h].mode != PMP_MODE_OFF);
       // Check specific required permissions
-      assign region_perm_check[c][r] =
-          ((pmp_req_type_i[c] == PMP_ACC_EXEC)  & csr_pmp_cfg_i[r].exec) |
-          ((pmp_req_type_i[c] == PMP_ACC_WRITE) & csr_pmp_cfg_i[r].write) |
-          ((pmp_req_type_i[c] == PMP_ACC_READ)  & csr_pmp_cfg_i[r].read);
+      assign region_perm_check[d][h] =
+          ((pmp_req_type_i[d] == PMP_ACC_EXEC)  & csr_pmp_cfg_i[h].exec) |
+          ((pmp_req_type_i[d] == PMP_ACC_WRITE) & csr_pmp_cfg_i[h].write) |
+          ((pmp_req_type_i[d] == PMP_ACC_READ)  & csr_pmp_cfg_i[h].read);
       // In machine mode, any match to a locked region without sufficient permissions is a fault
-      assign machine_access_fault[c][r] = region_match_both[c][r] & csr_pmp_cfg_i[r].lock &
-                                          ~region_perm_check[c][r];
+      assign machine_access_fault[d][h] = region_match_both[d][h] & csr_pmp_cfg_i[h].lock &
+                                          ~region_perm_check[d][h];
       // In any other mode, any access should fault unless is matches a region
-      assign user_access_allowed[c][r]  = region_match_both[c][r] & region_perm_check[c][r];
+      assign user_access_allowed[d][h]  = region_match_both[d][h] & region_perm_check[d][h];
     end
-    assign access_fault[c] = (priv_mode_i[c] == PRIV_LVL_M) ? |machine_access_fault[c] :
-                                                              ~|user_access_allowed[c];
+    assign access_fault[d] = (priv_mode_i[d] == PRIV_LVL_M) ? |machine_access_fault[d] :
+                                                              ~|user_access_allowed[d];
 
-    assign pmp_req_err_o[c] = access_fault[c];
+    assign pmp_req_err_o[d] = access_fault[d];
   end
+  endgenerate
 
 endmodule

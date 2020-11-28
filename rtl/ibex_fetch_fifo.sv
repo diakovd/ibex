@@ -161,31 +161,35 @@ module ibex_fetch_fifo #(
   // Since an entry can contain unaligned instructions, popping an entry can leave the entry valid
   assign pop_fifo = out_ready_i & out_valid_o & (~aligned_is_compressed | out_addr_o[1]);
 
-  for (genvar i = 0; i < (DEPTH - 1); i++) begin : g_fifo_next
+  generate
+  genvar j;	
+  for (j = 0; j < (DEPTH - 1); j++) begin : g_fifo_next
     // Calculate lowest free entry (write pointer)
-    if (i == 0) begin : g_ent0
-      assign lowest_free_entry[i] = ~valid_q[i];
+    if (j == 0) begin : g_ent0
+      assign lowest_free_entry[j] = ~valid_q[j];
     end else begin : g_ent_others
-      assign lowest_free_entry[i] = ~valid_q[i] & valid_q[i-1];
+      assign lowest_free_entry[j] = ~valid_q[j] & valid_q[j-1];
     end
-
+	
     // An entry is set when an incoming request chooses the lowest available entry
-    assign valid_pushed[i] = (in_valid_i & lowest_free_entry[i]) |
-                             valid_q[i];
+    assign valid_pushed[j] = (in_valid_i & lowest_free_entry[j]) |
+                             valid_q[j];
     // Popping the FIFO shifts all entries down
-    assign valid_popped[i] = pop_fifo ? valid_pushed[i+1] : valid_pushed[i];
+    assign valid_popped[j] = pop_fifo ? valid_pushed[j+1] : valid_pushed[j];
     // All entries are wiped out on a clear
-    assign valid_d[i] = valid_popped[i] & ~clear_i;
+    assign valid_d[j] = valid_popped[j] & ~clear_i;
 
     // data flops are enabled if there is new data to shift into it, or
-    assign entry_en[i] = (valid_pushed[i+1] & pop_fifo) |
+    assign entry_en[j] = (valid_pushed[j+1] & pop_fifo) |
                          // a new request is incoming and this is the lowest free entry
-                         (in_valid_i & lowest_free_entry[i] & ~pop_fifo);
+                         (in_valid_i & lowest_free_entry[j] & ~pop_fifo);
 
     // take the next entry or the incoming data
-    assign rdata_d[i]  = valid_q[i+1] ? rdata_q[i+1] : in_rdata_i;
-    assign err_d  [i]  = valid_q[i+1] ? err_q  [i+1] : in_err_i;
+    assign rdata_d[j]  = valid_q[j+1] ? rdata_q[j+1] : in_rdata_i;
+    assign err_d  [j]  = valid_q[j+1] ? err_q  [j+1] : in_err_i;
   end
+  endgenerate
+  
   // The top entry is similar but with simpler muxing
   assign lowest_free_entry[DEPTH-1] = ~valid_q[DEPTH-1] & valid_q[DEPTH-2];
   assign valid_pushed     [DEPTH-1] = valid_q[DEPTH-1] | (in_valid_i & lowest_free_entry[DEPTH-1]);
@@ -207,25 +211,30 @@ module ibex_fetch_fifo #(
     end
   end
 
-  for (genvar i = 0; i < DEPTH; i++) begin : g_fifo_regs
+  generate
+  genvar k;
+  for (k = 0; k < DEPTH; k++) begin : g_fifo_regs
     always_ff @(posedge clk_i) begin
-      if (entry_en[i]) begin
-        rdata_q[i]   <= rdata_d[i];
-        err_q[i]     <= err_d[i];
+      if (entry_en[k]) begin
+        rdata_q[k]   <= rdata_d[k];
+        err_q[k]     <= err_d[k];
       end
     end
   end
+  endgenerate
 
   ////////////////
   // Assertions //
   ////////////////
+`ifndef VERILATOR
+  // must not push and pop simultaneously when FIFO full
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      (in_valid_i && pop_fifo) |-> (!valid_q[DEPTH-1] || clear_i)) else
+    $display("Simultaneous pushing and popping not supported when FIFO full");
 
-  // Must not push and pop simultaneously when FIFO full.
-  `ASSERT(IbexFetchFifoPushPopFull,
-      (in_valid_i && pop_fifo) |-> (!valid_q[DEPTH-1] || clear_i), clk_i, !rst_ni)
-
-  // Must not push to FIFO when full.
-  `ASSERT(IbexFetchFifoPushFull,
-      (in_valid_i) |-> (!valid_q[DEPTH-1] || clear_i), clk_i, !rst_ni)
-
+  // must not push to FIFO when full
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      (in_valid_i) |-> (!valid_q[DEPTH-1] || clear_i)) else
+    $display("Must not push when FIFO full");
+`endif
 endmodule

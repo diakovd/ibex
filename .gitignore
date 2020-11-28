@@ -13,3 +13,4 @@ trace_core_*.log
 # Simple system output files
 ibex_simple_system.log
 ibex_simple_system_pcount.csv
+*.bak

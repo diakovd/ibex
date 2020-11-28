@@ -39,7 +39,7 @@ module ibex_register_file #(
   localparam int unsigned ADDR_WIDTH = RV32E ? 4 : 5;
   localparam int unsigned NUM_WORDS  = 2**ADDR_WIDTH;
 
-  logic [DataWidth-1:0] mem[NUM_WORDS];
+  logic [DataWidth-1:0] mem[NUM_WORDS] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
 
   logic [NUM_WORDS-1:1] waddr_onehot_a;
 
@@ -96,7 +96,9 @@ module ibex_register_file #(
   end
 
   // Individual clock gating (if integrated clock-gating cells are available)
-  for (genvar x = 1; x < NUM_WORDS; x++) begin : gen_cg_word_iter
+  generate
+  genvar x;
+  for (x = 1; x < NUM_WORDS; x++) begin : gen_cg_word_iter
     prim_clock_gating cg_i (
         .clk_i     ( clk_int           ),
         .en_i      ( waddr_onehot_a[x] ),
@@ -104,7 +106,8 @@ module ibex_register_file #(
         .clk_o     ( mem_clocks[x]     )
     );
   end
-
+  endgenerate	
+  
   // Actual write operation:
   // Generate the sequential process for the NUM_WORDS words of the memory.
   // The process is synchronized with the clocks mem_clocks[k], k = 1, ..., NUM_WORDS-1.
