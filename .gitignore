@@ -14,3 +14,5 @@ trace_core_*.log
 ibex_simple_system.log
 ibex_simple_system_pcount.csv
 *.bak
+examples/fpga/ms/Run_ibex_tb.tcl
+examples/fpga/ms/wave_top_artya7_100_tb.do
